@@ -1,0 +1,1721 @@
+---
+title: "CRISPRi paper"
+author: "Dennis Hazelett"
+date: "5/3/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## CRISPRi knockdown of 74 transcription factors in K562 cell line reveals underlying logic of the transcriptome
+
+### Abstract
+
+As part of a novel heuristic exercise to learn widely used bioinformatic techniques to analyze RNA-seq data sets, we sought large-scale publicly available data for which scant prior analyses exist. We identified 168 samples from the ENCODE consortium in which expression of 74 transcription factors in 3 classes, including X sequence-specific, DNA-binding Transcription Factors, Y chromatin remodeling factors, and Z cofactors and coregulators were knocked down individually in the K562 Leukaemia cell line via CRISPRi technology. We endeavored to understand the quality, validity and potential usefulness of these data. Our analyses show that.. In addition, we explored the properties of the three aforementioned classes of factors, as well as some specific pathways of interest. 
+
+### Introduction
+
+### Materials and Methods
+
+### Results
+
+#### Assessment of Global trends across all 168 replicates (Amber's TP)
+
+We hypothesized that there were batch effects leading to different quality of sequencing between the batches. To examine this, we analyzed the data by batch using all following multiqc metrics: percent of assigned reads, assigned reads (in millions), percent of aligned bases overlapping ribosomal RNA regions, percent of aligned bases overlapping UTRs of mRNA transcripts, percent of aligned bases overlapping coding regions of mRNA transcripts, percent of aligned bases overlapping intronic regions, percent of aligned bases overlapping intergenic regions, percent uniquely mapped reads, and uniquely mapped reads (millions). This data was used from multiqc files generated with samtools and picard multiqc for the dataset. I looked at these metrics in two major ways. First, if these metrics differed by batch in general and second, if the distribution of the density of logcounts across all genes differed consistently when the batches were sorted by these metrics. This approach was taken to determine if sequencing quality issues could affect the batches overall and whether specific batches should be discarded. Looking at all the sequencing metrics and how this affected the expression counts overall as opposed to looking at either of these in isolation allowed the impact of sequencing quality on batch and on expression logcounts to be separated.
+
+```{r load_qc_data}
+library(ggplot2); library(tidyr); library(dplyr); library(SummarizedExperiment); library(pheatmap)
+library(DESeq2); library(biomaRt); library(fgsea)
+library(ggridges)
+library(tidyverse)
+library(janitor)
+select <- dplyr::select
+
+
+multiqcinfo <- read.csv("multiqc_table.csv")
+head(multiqcinfo)
+picardfullinfo <- read.csv("multiqc_picard_RnaSeqMetrics.csv")
+
+load("lec4_results.rda")
+load("crispriDE_batch_eval.RDa")
+versusBatchA <- crispriDE_batch_eval
+
+controlB_controlA <- results(crispriDE_batch_eval, name = "evaluate_CRISPRi_CONTROL_B_vs_CRISPRi_CONTROL_A", tidy = TRUE)
+controlB_controlA[controlB_controlA$padj < 0.01 & !is.na(controlB_controlA$padj), ] %>% filter(abs(log2FoldChange) > 1) %>% dim()
+batchDiff1 <- controlB_controlA[controlB_controlA$padj < 0.01 & !is.na(controlB_controlA$padj), ] %>% filter(abs(log2FoldChange) > 1)
+controlB_controlA[controlB_controlA$padj < 0.01 & !is.na(controlB_controlA$padj), ] %>% filter(abs(log2FoldChange) > 2) %>% dim()
+batchDiff2 <- controlB_controlA[controlB_controlA$padj < 0.01 & !is.na(controlB_controlA$padj), ] %>% filter(abs(log2FoldChange) > 2)
+names(batchDiff2)
+head(batchDiff2$row)
+
+expcount <- assays(crispriDE)$logcounts
+#expcount[1:6,1:6]
+expDiff1 <- expcount[batchDiff1$row,]
+dim(expDiff1)
+expDiff2 <- expcount[batchDiff2$row,]
+dim(expDiff2)
+
+batchinfo <- colData(crispriDE)
+#rownames(batchinfo)
+batchinfo <- rownames_to_column(as.data.frame(batchinfo))
+batchinfo <- rename(batchinfo, rowname = "samples")
+head(batchinfo)
+
+picardfullinfo <- rename(picardfullinfo, Sample = "samples")
+head(picardfullinfo)
+picardfullinfo <- clean_names(picardfullinfo)
+head(picardfullinfo)
+
+# create percent picard statistics
+picardinfo <- select(picardfullinfo, samples, pf_aligned_bases, ribosomal_bases, coding_bases, utr_bases, intronic_bases, intergenic_bases)
+head(picardinfo)
+
+picardinfo <- picardinfo %>% mutate(., perc_ribosomal = ribosomal_bases*100/pf_aligned_bases) %>%
+  mutate(., perc_coding = coding_bases*100/pf_aligned_bases) %>%
+  mutate(., perc_utr = utr_bases*100/pf_aligned_bases) %>%
+  mutate(., perc_intronic = intronic_bases*100/pf_aligned_bases) %>%
+  mutate(., perc_intergenic = intergenic_bases*100/pf_aligned_bases) %>%
+  mutate(., total_check = perc_ribosomal + perc_coding + perc_utr + perc_intronic + perc_intergenic)
+
+head(picardinfo)
+
+picardsum <- picardinfo %>% 
+  select(., samples, perc_ribosomal, perc_coding, perc_utr, perc_intronic, perc_intergenic)
+
+# Exp focused (logcount) density plots
+
+byExp <- t(expcount)
+class(byExp)
+sampleids <- rownames(byExp)
+
+byExp[1:6,1:6]
+byExp <- as_tibble(byExp)
+byExp <- add_column(byExp, sampleids, .before = 1)
+byExp <- rename(byExp, sampleids = "samples")
+byExp[1:6,1:6]
+
+finalDF <- byExp
+#finalDF <- mutate_if(finalDF, is.factor, as.numeric)
+finalDF <- finalDF %>% gather(., key = "genenames", value = "counts", -samples)
+finalDF <- finalDF %>% merge(., batchinfo, by.x = "samples")
+finalDF <- finalDF %>% merge(., multiqcinfo, by.x = "samples")
+finalDF <- finalDF %>% merge(., picardsum, by.x = "samples")
+finalDF %>% group_by(batch)
+head(finalDF)
+
+finalDF$batch
+finalDF$batch <- ordered(finalDF$batch)
+finalDF$batch
+
+save(list = "finalDF", file = "AmberOrganizedDF.rda")
+```
+
+Based on the results, batch C was much lower in quality than the other two batches and should not be used. It had far fewer assigned reads and uniquely mapped reads; a significantly lower percent of bases overlapping UTRs and coding regions; a much lower percentage of assigned reads and uniquely mapped reads overall; and a significantly higher percentage of ribosomal bases, intronic bases, and intergenic bases. As far as the other two batches, batch B had fewer assigned reads and uniquely mapped reads overall and as well as lower percentages of assigned reads and uniquely mapped reads than batch A. However, batch B also had a higher percentage of bases overlapping coding regions with a lower percentage overlapping intronic and intergenic regions than batch A. Batch B had no significant differences in the percentage of ribosomal bases or UTRs compared to batch A.
+
+```{r amber_figs}
+
+
+# can just start from here with the following (rather than recleaning the data)
+load("AmberOrganizedDF.rda")
+
+metrics <- c("percent_assigned", "assigned_reads_millions","PCT_RIBOSOMAL_BASES",
+             "PCT_MRNA_BASES", "uniquely_mapped_percent", "uniquely_mapped_millions", "perc_ribosomal",
+             "perc_coding", "perc_utr", "perc_intronic", "perc_intergenic")
+
+
+boxplots <- function(metric_data = NULL, full_data = NULL) {
+  for (metric in metric_data) {
+    
+    allBoxplotMetric <- 
+      ggplot(full_data, aes(x = batch, y = eval(as.name(metric)), color = batch)) +
+      scale_color_manual(name = "Batch", values=c("red", "yellow", "blue")) +
+      labs(x = "batches", y = metric) +
+      geom_boxplot()
+    
+    ggsave(paste0("all_boxplot_", metric, ".jpg"), allBoxplotMetric)
+  }
+}
+
+boxplots(metrics, finalDF)
+
+
+
+densityplots <- function(metric_data = NULL, full_data = NULL) {
+  for (metric in metric_data) {
+
+    attach(full_data)
+    sortedSamples <- full_data[order(batch, eval(as.name(metric))),]
+    detach(full_data)
+    
+    sampleorder <- rev(unique(sortedSamples$samples))
+    
+    full_data$samples <- ordered(full_data$samples, levels = sampleorder)
+    
+    allDensityMetric <- 
+      ggplot(full_data, aes(x = counts, y = samples, 
+                          fill = eval(as.name(metric)), color = batch)) +
+      scale_color_manual(name = "Batch", values=c("red", "yellow", "blue")) +
+      scale_fill_continuous(name = metric) +
+      geom_density_ridges()
+    
+    ggsave(paste0("all_density_", metric, ".pdf"), allDensityMetric, height = 20)
+  }
+}
+
+densityplots(metrics, finalDF)
+
+```
+
+
+Batch A had significant patterns in the density of its logcount distributions across all genes when sorted by multiple multiqc metrics: assigned reads in millions, percent of assigned reads, percent of intergenic reads, percent of intronic reads, percent of UTR reads, and percent of coding reads. By contrast, the density distributions of logcounts across the metrics assigned reads in millions and percent of assigned reads did not significantly differ in batch B while percent of intergenic reads, percent of intronic reads, percent of UTR reads, and percent of coding reads did explain some logcounts density variation, with percent UTR reads explaining the most variation in density distributions. Overall, we see that lower quality samples tend to have more of their distribution in the center, rather than a two humped plot with some genes having no expression counts and other genes having high expression counts.
+
+The batches overall differed in sequencing quality metrics. Batch C was the lowest in quality and significantly different from the other two batches in quality, leading to the conclusion that it should be discarded from analysis. Batch B and batch A had differing quality as well, but to a less extreme extent. Both batch A and batch B had variation in the density of logcounts by gene explained by various multiqc metrics. The strongest predictors of variation in logcounts density were percentage of reads overlapping UTRs and percentage of reads overlapping coding regions, with percentage overlapping intergenic and intronic regions also contributing. Given that the batches also varied overall in some of these metrics such as the percentage of bases overlapping coding regions, we expect sequencing quality to have had significant effects on the batches. Alternatively, this could be natural variation in sequencing metrics, and the effect on logcounts densities by picard RnaSeq metrics could be negligible in downstream analysis. The consistent lower quality among certain types of distributions (regarding the lack of a lower peak and a higher broad middle hump) should be investigated downstream for its effects on the success of the knockdown.
+
+#### Differential expression analysis (Simon's global DEA)
+
+#### Knockdown effect sizes vs. differential expression effect sizes (Takashi's TP)
+
+Transcription factors and histone modifying enzymes are proteins that function in the nucleus to initiate and regulate transcription of a particular set of genes. They dynamically interact with each other and forming a complex network of transcription in a cell. One of the ways to study a transcription network orchestrated by these proteins is to remove (or suppress) the function of a given factor. Using data from knockdown studies of a defined set of DNA-binding transcription factors and histone modification enzymes conducted on the K562 cell line, we hypothesized that there is a relationship between the degree of knockdown and the number of differentially expressed (DE) genes.
+
+We started with the hypothesis that a relationship exists between the strength of a knockdown and numbers of genes/effect sizes of differential expression. To address this hypothesis, we analyzed the entire set of targeted transcription factors to find out the relationship. Using the analyzed data, we plotted the effect of a target gene knockdown (fold change on X axis) vs the number of differentially expressed (DE) genes (Figure 1). We used an adjusted p-value (padj) of less than 0.05 to count the number of significantly DE genes. Interestingly, no apparent relationship was observed.
+
+```{r Takashis_code_1}
+load('lec4_results.rda')
+genelist <- list()
+for (myres in resultsNames(crispriDE)[-c(1:3)]) {
+  reslist <- DESeq2::results(crispriDE, name = myres, alpha = 0.05)
+  #reslist <- reslist[reslist$padj < .05 & !is.na(reslist$padj), ]
+  genelist <- c(genelist, list(reslist))
+}
+names(genelist) <- resultsNames(crispriDE)[-c(1:3)]
+for (tfknockdown in seq_along(genelist)) {
+  tf_name <- names(genelist)[tfknockdown]
+  tf_name <- stringr::str_split(tf_name, "_")[[1]][2]
+  tf_id <- try(bitr(geneID = tf_name, fromType = "SYMBOL", toType = "ENSEMBL", OrgDb = org.Hs.eg.db))
+  if(inherits(tf_id, 'try-error')) {
+    tf_name <- 'NSD2'
+    tf_id <- try(bitr(geneID = tf_name, fromType = "SYMBOL", toType = "ENSEMBL", OrgDb = org.Hs.eg.db))
+  }
+  tf_FC <- genelist[[tfknockdown]][tf_id$ENSEMBL,]$log2FoldChange
+  tf_n_sig <- nrow(subset(genelist[[tfknockdown]], padj < 0.05))
+  tf_median_eff <- median(abs(genelist[[tfknockdown]]$log2FoldChange), na.rm = T)
+  tf_mean_eff <- mean(abs(genelist[[tfknockdown]]$log2FoldChange), na.rm = T)
+  
+  if (tfknockdown == 1) {
+    effect_size_df <- data.frame(foldchange = tf_FC, n_sig = tf_n_sig, tf_name = tf_name, mean_eff = tf_mean_eff, median_eff = tf_median_eff, stringsAsFactors = F)
+  } else {
+    effect_size_df <- bind_rows(effect_size_df, data.frame(foldchange = tf_FC, n_sig = tf_n_sig, tf_name = tf_name, mean_eff = tf_mean_eff, median_eff = tf_median_eff, stringsAsFactors = F))
+  }
+}
+
+effect_size_df <- effect_size_df[-c(24,73),]
+sample.table <- as.data.frame(colData(crispriDE)[, c("treatment", "batch")])
+sample.table$treatment <- as.character(sample.table$treatment)
+sample.table$ID <- rownames(colData(crispriDE))
+TF_list <- as.character(sample.table$treatment)
+TF_list <- unique(TF_list[!(TF_list %in% "CRISPRi_CONTROL")])
+TF_list[TF_list == "WHSC1"] <- "NSD2"
+TF_df <- bitr(TF_list, fromType = "SYMBOL", toType = "ENSEMBL", OrgDb = org.Hs.eg.db)
+
+TF_df <- TF_df[!duplicated(TF_df$SYMBOL), ]
+sample.table[sample.table$treatment == "WHSC1", ]$treatment <- "NSD2"
+
+crispriVST <- vst(crispriDE)
+vst_matrix <- assay(crispriVST)
+base_expression <- data.frame(base_expression = numeric(), tf_name = character())
+for(myTF in TF_df$SYMBOL) {
+  myBatch <- as.character(sample.table[sample.table$treatment == myTF, ]$batch)[1]
+  myControls <- sample.table[sample.table$batch == myBatch & sample.table$treatment == "CRISPRi_CONTROL", ]$ID
+  myExpression <- vst_matrix[TF_df[TF_df$SYMBOL == myTF, ]$ENSEMBL, myControls]
+  myExpression <- mean(myExpression)
+  base_expression <- rbind(base_expression, data.frame(base_expression = myExpression, tf_name = myTF))
+}
+
+effect_size_df <- left_join(effect_size_df, base_expression)
+
+HMEs <- c("CITED2", "SETDB1", "SMARCA4", "WHSC1", "HMGN3", "HMGN2", "HMGN1", "HMGB2", "HDAC8", "HMGA1", "RBBP7", "RNF2", "TBL1XR1", "TRIM2")
+
+DBTFs <- c("ARID3A", "ATF3", "BACH1", "DLX1", "ERF", "FOXK2", "FOXM1", "GATA1", "GATA2", "HMBOX1", "HOXB4", "HOXB9", "HSF1", "KLF2", "MEIS2", "MITF", "MXD3", "NFATC1", "NFE2L1", "NFYA", "NR2C2", "NR2F2", "NR4A1", "RELA", "RFX5", "SIX5", "SMAD5", "SP1", "SP2", "SRF", "STAT1", "STAT2", "STAT5A", "STAT6", "TEAD2", "TEAD4", "TFDP1", "THAP1", "USF1", "USF2", "ZBTB33", "ZNF143", "ZNF384", "ZNF395")
+
+effect_size_df$tf_class <- NA
+effect_size_df$tf_class[is.na(effect_size_df$tf_class)] <- "Unknown"
+effect_size_df[effect_size_df$tf_name %in% HMEs, ]$tf_class <- "HME"
+effect_size_df[effect_size_df$tf_name %in% DBTFs, ]$tf_class <- "DBTF"
+
+effect_size_df <- effect_size_df %>%
+  mutate(xlabel = tf_name,
+         xlabel = factor(xlabel, 
+                         levels = xlabel[order(foldchange)]))
+
+Figure_1a <- ggplot(effect_size_df, aes(x = xlabel, y = n_sig, colour = tf_class)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Genes ordered by fold change", y = "Number of Differentially Expressed genes") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown")) 
+  #+ 
+  #geom_text_repel(aes(label = tf_name), hjust = 1)
+Figure_1a
+
+Figure_1b <- ggplot(effect_size_df, aes(x = foldchange, y = n_sig, colour = tf_class)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Fold Change", y = "Number of DE genes") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown"))
+Figure_1b
+```
+
+Furthermore, we also wanted to measure the relationship between the target gene knockdown effect and mean DE effect size. To see the relationships, mean DE effect size values were plotted against the target gene knockdown effect (Figure 2). However, it seems, again, that there are no any obvious relationships.
+
+```{r Takashi_code_2}
+Figure_2a <- ggplot(data = effect_size_df, mapping = aes(x = xlabel, y = mean_eff, colour = tf_class)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Genes ordered by fold change", y = "Mean of Differentially Expressed Genes Effect Size") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown"))
+Figure_2a
+
+Figure_2b <- ggplot(data = effect_size_df, mapping = aes(x = foldchange, y = mean_eff, colour = tf_class)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Fold Change", y = "Mean of DE Genes Effect Size") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown"))
+Figure_2b
+```
+
+Moreover, we went on to examine the target gene knockdown effect and the median DE effect size. The latter values were plotted against the target gene knockdown effect (Figure 3). Again, we did not note any obvious tendency.
+
+```{r Takashi_3}
+Figure_3 <- ggplot(data = effect_size_df, mapping = aes(x = xlabel, y = median_eff, colour = tf_class)) + 
+  geom_point() + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Genes ordered by fold change", y = "Median of Differentially Expressed Genes Effect Size") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown")) 
+Figure_3
+
+Figure_3b <- ggplot(data = effect_size_df, mapping = aes(x = foldchange, y = median_eff, colour = tf_class)) + 
+  geom_point() + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Fold Change", y = "Median of DE Genes Effect Size") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown")) 
+Figure_3b
+```
+
+The results have been classified according to DNA-binding TFs (DBTF: ARID3A, ATF3, BACH1, DLX1, ERF, FOXK2, FOXM1, GATA1, GATA2, HMBOX1, HOXB4, HOXB9, HSF1, KLF2, MEIS2, MITF, MXD3, NFATC1, NFE2L1, NFYA, NR2C2, NR2F2, NR4A1, RELA, RFX5, SIX5, SMAD5, SP1, SP2, SRF, STAT1, STAT2, STAT5A, STAT6, TEAD2, TEAD4, TFDP1, THAP1, USF1, USF2, ZBTB33, ZNF143, ZNF384, ZNF395) or histone modification enzymes (HME: ITED2, SETDB1, SMARCA4, WHSC1, HMGN3, HMGN2, HMGN1, HMGB2, HDAC8, HMGA1, RBBP7, RNF2, TBL1XR1, TRIM2). We have deleted three TFs (HMGA1, HMGN3, SETDB1) from DBTFs because we noticed these three TFs belong to both categories (HME and DBTF). For the remaining transcription factors that are not attributed to DBTF or HME, we classified them as Unknown. It seems that HMEs have fewer counts than DBTFs (Figure 1), although I have no answer to explain this yet. Besides, I also noted that expression levels vary by TF.
+Finally, we also tried to measure the relative effect size of a knockdown (not genes) as a function of the mean gene expression of the targets. Since we noted that expression levels varied by TF, we looked into the expression level for each TF in control samples. Regarding the TFs whose basal expression levels are relatively low, it could be that the effect of their knockdown is not correctly assessed or appreciated. Conversely, very abundant TFs may appear to be suppressed considerably, so long as we just look at values obtained for knockdown experiments. Thus, we re-analyzed the result after calculating base expression values by using control and knockdown values. The base expression values were then plotted against the target gene knockdown effect (Figure 4). This re-analysis made us aware that the values represented by the base expression tended to be higher for many if not all of the HMEs with relatively low DE counts. Despite these analyses, we could not find a distinctive relationship, e.g. an inverse relationship or clusters, between the degree of knockdown and the number of DE genes. There may be different properties we are not been aware of that would support our original hypothesis.
+
+
+```{r Takashi_4}
+Figure_4a <- ggplot(data = effect_size_df, mapping = aes(x = xlabel, y = base_expression, colour = tf_class)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Genes ordered by fold change", y = "Base Expression") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown"))
+Figure_4a
+
+Figure_4b <- ggplot(data = effect_size_df, mapping = aes(x = foldchange, y = base_expression, colour = tf_class)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Fold Change", y = "Base Expression") + scale_color_manual(values = c("red", "blue", "grey"), name  ="Category", breaks=c("DBTF", "HME", "Unknown"), labels=c("DNA-binding TFs", "Histone Modification Enzymes", "Unknown"))
+Figure_4b
+```
+
+#### Analysis of failed knockdown experiments (Shantae's TP)
+
+I didn't receive Rmd for this
+
+We analyzed the entire set of targeted transcription factors to determine which experiments, if any, were unsuccessful in significantly knocking down their target gene. In total, 18 TFs were identified as unsuccessful in knocking down their target via CRISPRi treatment. Those experiments which did not result in a significant decrease (as determined by p < 0.05) of their target TF were deemed failed and are listed below in Figure 1. Interestingly, each of the failed experiments still resulted in significant DE of other non-targeted genes, some with only a few (ARID3A) while others affected several thousand (HOXB4, MITF, SP1). This suggested that perhaps terming these experiments as “failed” might not be entirely accurate, as other genes were clearly affected and differentially expressed with CRISPRi treatment, even if the intended target wasn’t. 
+We then analyzed if there were any trends in common biological pathways or functions which could help to explain why these targets were not significantly decreased. Using gene ontology, we determined five major clusters among the set of 18 TFs, most notably involvement in the lysosome, antigen processing and presentation, and carbon metabolism (Figure 2). This analysis identified many genes which are likely functional or share similar processes within each cluster, and their associated fold change. Given the cancerous nature of the cells in which these experiments were performed, these cluster outcomes seem reasonable. Of note, this analysis identified some genes which were successfully targeted in other CRISPRi experiments, such as NFYb. These similarities could potentially allow for functional compensation, meaning a single target knockdown may not have been successful as other TFs share its effects and could be acting in a compensatory fashion to ensure the intended targets maintain their ideal expression levels. The results seem logical in the context of cancerous cells, as these processes are likely vital to survival and oncogenesis, and would be critical for the cells to maintain. Furthermore, there may be a relationship between the number of affected genes in each failed TF and its role in promoting oncogenesis in these cells. 
+To determine how each TF may be contributing to the phenotype through gene expression, and to further understand why this set of genes resulted in little down regulation, we used the KEGG over-representation pathway analysis (Figure 3). As expected, many of the genes were linked to processes known to be involved in oncogenesis, such as VEGF signaling, DNA replication, and cancer proteoglycans. The samples which have the highest ratios, meaning they are more greatly enriched amongst all the genes, are represented by larger dots. The more significantly enriched a particular TF is in a certain function, the more red it appears. Based on this analysis it seems that many processes are shared among the TFs, some being involved in oncogenesis, but others with cellular homeostasis. Interestingly, there seems to be an association between the number of DE genes and the number of KEGG enrichments. For example, HOXB4 has nearly 8700 DE genes and also seems to have one of the largest spreads of functionality in KEGG analysis. Given the wide range of function and regulation by this gene, the amount of DE genes affected should be greater. 
+Overall, terming these experiments as failed may not be an accurate conclusion. Clearly the CRISPRi treatments had effects on gene expression, some much more than others. What is important to consider is whether these results could be attributed to the relative expression of each TF in this system. If baseline expression of the TF is relatively low to begin with, slight changes in expression, even if not significant, can result in large global changes. Furthermore, many of these “failed” TFs have other family members with high sequence homology, which could present the opportunity for compensatory regulation. 
+
+
+#### Effects of knockdown of sequence-specific, DNA-binding Transcription Factors (Kruttika)
+
+This dataset, in which a large number of factors was individually knocked out in a single uniform cell line, provided a unique opportunity to look at common regulatory themes in light of the motif or DBD specificity of TFs. Therefore, we chose to determine whether DEA response genes could be classified according to the sequence-specific motif or DNA binding domains (DBDs) of the targeted transcription factor. Using DESeq2 for analyzing RNA-seq data and plotting tools we sought to determine whether TFs with similar motifs or DBDs regulate similar genes.
+
+Having identified a subset of factors that bind directly to DNA, we classified TFs according to their DBDs1 and sequence-specific motifs2. We then annotated the TFs with their DBDs or motifs for the DEA set.
+
+We first performed unsupervised clustering with manhattan distance metric for clustering rows and correlation distance metric for clustering columns and ward.D2 clustering algorithm for the first 100 most variant genes including annotations for DBD and motif. We found no evidence for clustering based on the TF DBDs or motifs or replicates and batches (fig.1). However, these analyses highlight large scale, multidimensional sources of variation that could be masking subtle associations with the annotations. Therefore, we attempted analysis based on PCA (fig.2) and dimensional reduction techniques as implemented in the RtSNE package. Exploration of different numbers of dimensions and perplexity values failed to resolve the samples by DBD or motifs (fig.3,4).
+
+DNA binding domains (DBD) are protein structures of the TFs which have a role in determining how the TFs bind to DNA. But one class of conserved DBD may be encoded by TFs with diverse binding specificity. In contrast, a sequence-specific motif is a specific sequence (usually encoded as a position weight matrix) of DNA that the TF is most likely to bind. Therefore, to understand the role of TFs in gene expression and regulation, it is essential to understand the regulation of genes with respect to these different classifications of TFs. Here we chose to determine whether differentially expressed genes as the result of targeted TF knockdown are coregulated amongst TFs with similar motifs and/or DBDs. Based on our unsupervised clustering and tSNE of differentially expressed genes we found no support for any such relationships.
+
+We used previously published data to determine the classification of TFs based on DBDs and motifs, but TF binding also depends on chromatin state for the particular cell line of interest and cross-talk between other TFs. There is also an interplay between enhancers and promoters that should be taken into account while classifying the TFs and determining their effects on gene expression. Extensive data exist within encode for addressing these questions in future studies, including chromatin state predictions and topological association domains for the K562 cell line. An alternative possibility accounting for our failure to observe associations could be that some TFs did not have an efficient knockdown or the efficiency of the knockdown was too low to quantify because of the low expression of TF in the K562 cell line.
+
+Thus, in conclusion, the hypothesis tested here systematically and in great detail was novel and could not have been tested prior to ENCODE. The fact that we do not see any clustering of differentially expressed genes based on either DBDs or motifs speaks to the impressive high degree of specificity of enhancer sequences i.e., factors with similar (but not identical) specificity regulate different genes altogether. This dataset provides an unprecedented view of these relationships given that so many genes were tested at the same time.
+
+```{r message=FALSE, warning=FALSE}
+#excel sheet for loading the motifs classes for TFs
+motifclass <- read_excel("TF_motif_classified.xlsx")
+DBDclass <- read_excel("TF_DBD_classified.xlsx")
+
+# loading the crisprDE data set 
+load("lec4_results.rda")
+
+# Annotating the columns of TF with motifs
+colData(crispriDE) <- merge(colData(crispriDE), motifclass)
+colData(crispriDE) <- merge(colData(crispriDE), DBDclass)
+
+# removing certain TFs that are not known to be DNA binding 
+
+filtered_DE <- crispriDE[ , !(colData(crispriDE)$DBD %in% c("unknown", "none", "AT HOOK", "HMG/SOX", "MBD", "JUND"))]
+
+filtered_DE <- filtered_DE[ , !(colData(filtered_DE)$Motif_clusters %in% c("N/A"))]
+
+# normalizing the filtered data set
+vst.gene <- vst(filtered_DE)
+
+# converting to data frame
+covar <- as.data.frame(colData(vst.gene))
+
+# change the data set to suite analysis
+
+TF_list <- unique(as.character(colData(crispriDE)$treatment))
+TF_list <- TF_list[-2]
+
+ids <- bitr(TF_list, fromType = "SYMBOL", toType = c("ENTREZID", "ENSEMBL"),
+            OrgDb = org.Hs.eg.db)
+
+ids <- bitr(TF_list, fromType = "SYMBOL", toType = c("ENTREZID", "ENSEMBL"),
+            OrgDb = org.Hs.eg.db)
+
+
+
+perturbed_genelist <- unique(ids$ENSEMBL)[unique(ids$ENSEMBL) %in% rownames(assay(vst.gene))]
+
+```
+
+##### heatmap of top 100 variant genes
+```{r fig.cap = "heatmap too long to show up properly in Rmarkdown, please see attached .png image"}
+covar <- as.data.frame(colData(vst.gene))
+covar <- covar[, c('treatment', 'batch', 'replicate', 'DBD', "Motif_clusters")]
+mostvariant_genelist <- matrixStats::rowMads(assay(vst.gene))
+
+
+names(mostvariant_genelist) <- rownames(assay(vst.gene))
+
+mostvariant_genelist <- sort(mostvariant_genelist, decreasing = T)
+
+
+kelly.colours <- c("gray95", "gray13", "gold2", "plum4", 
+                   "darkorange1", "lightskyblue2", "firebrick", "burlywood3", 
+                   "gray51", "springgreen4", "lightpink2", "deepskyblue4", "lightsalmon2", 
+                   "mediumpurple4", "orange", "maroon", "yellow3", "brown4", "yellow4", 
+                   "sienna4", "chocolate", "gray19")
+
+
+replicate_colors <- list(replicate = kelly.colours[1:4],
+                         batch = kelly.colours[5:7],
+                         DBD = kelly.colours[1:18])
+names(replicate_colors$replicate) <- as.character(1:4) 
+
+names(replicate_colors$batch) <- c("A","B","C")
+
+names(replicate_colors$DBD) <- c("ARID", "bZIP", "HOMEODOMAIN", "ETS", "FORKHEAD", "GATA", "HSF", "bHLH", "rel", "CBF/NF-Y", "Nuclear receptor", "rfx", "C2H2 ZF", "MADS box", "STAT", "TEA", "E2F", "THAP finger")   
+
+pheatmap(assay(vst.gene)[names(mostvariant_genelist[1:100]), ],
+         color = viridis::cividis(100), 
+         annotation_col = covar[, c("replicate", "batch", "DBD", "Motif_clusters")],
+         annotation_colors = replicate_colors, 
+         show_rownames = F, show_colnames = F, border_color = NA, 
+         clustering_distance_rows = "manhattan",
+         clustering_distance_cols = "correlation", clustering_method = "ward.D2", main = "100 most variant genes", fontsize = 30)
+
+#ggsave("heatmap_DBD_Motifs.png", heatmap_DBD_Motifs, width = 20, height = 40)
+```
+
+
+##### PCA plot 
+```{r fig.cap="PCA plot for perturbed genes"}
+# using the prcomp function to calculate the values for plotting PCA
+pca.gene <- prcomp(t(assay(filtered_DE)[perturbed_genelist, ]))
+
+# subsetting out the x column from the calculations
+pca.data <- pca.gene$x
+
+rownames(pca.data) <- seq(1:78)
+
+
+# adding rownames and columns to the values calculated for PCA
+pca.data <- cbind(pca.data[rownames(colData(vst.gene)),], as.data.frame(colData(vst.gene)))
+
+# PCA plot for DBD classification of TFs
+ggplot(pca.data, aes(PC1, PC2, col = DBD)) +
+  geom_point(size=4) +
+  scale_color_manual(values = kelly.colours) +
+  theme_bw() +
+  xlab(paste0("PC1: ",prettyNum(summary(pca.gene)$importance[2,1]*100,
+                                digits = 2, decimal.mark = "."),"% variance")) +
+  ylab(paste0("PC2: ",prettyNum(summary(pca.gene)$importance[2,2]*100,
+                                digits = 2, decimal.mark = "."),"% variance")) +
+  coord_fixed() + theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.text = element_text(size=20),
+        legend.title = element_text(size=20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20)) +
+  guides(colour = guide_legend(override.aes = list(size=5)))
+
+# PCA plot for Motif_clusters classification of TFs
+ggplot(pca.data, aes(PC1, PC2, col = Motif_clusters)) +
+  geom_point(size=4) +
+  theme_bw() +
+  xlab(paste0("PC1: ",prettyNum(summary(pca.gene)$importance[2,1]*100,
+                                digits = 2, decimal.mark = "."),"% variance")) +
+  ylab(paste0("PC2: ",prettyNum(summary(pca.gene)$importance[2,2]*100,
+                                digits = 2, decimal.mark = "."),"% variance")) +
+  coord_fixed() + theme_linedraw() +
+  theme(panel.grid = element_blank(),
+        legend.text = element_text(size=20),
+        legend.title = element_text(size=20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20)) +
+  guides(colour = guide_legend(override.aes = list(size=5)))
+
+#ggsave("PCA_DBD.png", PCA_DBD, height = 10, width = 10)
+#ggsave("PCA_Motif.png", PCA_Motif, height = 10, width = 10)
+
+#grid_PCA <- gridExtra::grid.arrange(PCA_DBD, PCA_Motif)
+#ggsave("grid_PCA.png", grid_PCA, height = 13, width = 10)
+
+```
+
+##### for Motif classified TFs
+```{r fig.cap = "tSNE plot of differentially expressed genes with colors defined for motif clusters of targeted TFs"}
+# code for tSNE plot
+tsne_motif <- Rtsne(t(assay(filtered_DE)[perturbed_genelist, ]), initial_dims=24, perplexity=10)
+
+
+# merging the covar data frame containing the DBD column to the Y data frame
+y_1_merge <- bind_cols(as.data.frame(tsne_motif$Y), covar)
+
+y_1_merge <- y_1_merge %>% mutate(., Motif_clusters = factor(Motif_clusters))
+
+# using ggplot to plot the tsne values with DNA binding domain as color
+
+cluster32 <- filter(y_1_merge, Motif_clusters == "cluster32")
+# using ggplot to plot the tsne values with DNA binding domain as color
+ggplot(y_1_merge, aes(V1,V2, col = Motif_clusters)) +
+  geom_point(aes(size = I(5))) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        legend.text = element_text(size=20),
+        legend.title = element_text(size=20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20)) +
+  guides(colour = guide_legend(override.aes = list(size=5)))
+
+#ggsave("tsne_motif_image.png", tsne_motif_image, height = 12, width = 9)
+
+  
+```
+
+##### DBD based classification, with dims equal to no of DBDs
+```{r fig.cap = "tSNE plot of differentially expressed genes with colors defined for DBDs of targeted TFs"}
+# code for tSNE plot
+tsne_DBD <- Rtsne(t(assay(filtered_DE)[perturbed_genelist, ]), initial_dims=19, perplexity=10)
+
+# merging the covar data frame containing the DBD column to the Y data frame
+y_2_merge <- bind_cols(as.data.frame(tsne_DBD$Y), covar)
+
+y_2_merge <- y_2_merge %>% mutate(., DBD = factor(DBD))
+y_2_merge <- y_2_merge %>% mutate(., Motif_clusters = factor(Motif_clusters))
+
+
+ggplot(y_2_merge, aes(V1,V2)) +
+  geom_point(aes(col = DBD, size = I(5))) +
+  scale_color_manual(values = kelly.colours) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        legend.text = element_text(size=20),
+        legend.title = element_text(size=20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20)) +
+  guides(colour = guide_legend(override.aes = list(size=5)))
+  
+#ggsave("tsne_DBD_image.png", tsne_DBD_image, height = 8, width = 9)
+
+#grid <- cowplot::plot_grid(tsne_DBD_image, tsne_motif_image,  labels = "AUTO", label_size = 30)
+
+#cowplot::save_plot("fig_grid.png", grid, base_height = 10, base_width = 20)
+```
+
+#### Effects of knockdown of chromatin remodeling factors (Peter)
+
+In eukaryotic cells, DNA is packaged into condensed structures called chromatin in the nucleus. DNA compaction is achieved by wrapping of DNA around histone octamer beads. Before transcription takes place, the DNA is unwound near the targeted gene to allow RNA polymerase to bind. Thus, histone modification plays a critical role in epigenetic regulation through methylation and acetylation by which gene expression is turned on and off. Using the RNAseq data on K562 cells treated by CRISPR interference (CRISPRi) targeting specific transcription factors generated by Michael Synder’s lab, we sought to determine if knockdown of histone modification enzymes result in dysregulation of common molecular pathways. To address this question, we identified all of the targeted transcription factors (TF) associated with histone modification. Using these subsets of TFs, we investigated the molecular functions (MF), biological processes (BP), and cellular components (CC) to identify common themes. 
+
+In order to identify all of the targeted TFs associated with histone modification, we used the DAVID  online gene functional classification tool (version 6.8)1,2 to classify the 74 targeted TF generated by the Synder’s lab using Homo sapiens as our gene background reference.  Out of the 74 TFs, 15 TFs (JUND, CITED2, TRIM28, HMGN3, HMGN2, HMGA1, HMGN2, HMGB2, WHSC1, RNF2, RBBP7, TBL1XR1, SMARCA4, SETDB1, and HDAC8) were associated with histone modification (GO:0000118 histone deacetylase complex, GO:0016585 chromatin remodeling complex, GO:0016568 chromatin modification, GO: 0005694 chromosome, GO:0051276 chromosome organization, and GO:0006325 chromatin organization)(Figure 1).
+In order to investigate common themes between the 15 TFs, we performed differential expression analysis of the treatment (targeted TF) against the CRISPRi control to identify significant differentially expressed genes (DES) with an FDR less than 0.05. Using the package clusterProfiler3, we compared biological themes (MF, BP, and CC) between the 15 TFs (Figure 2A-C). Using the Ward2 clustering algorithm, we clustered the TFs using the computed gene ratio from each GO term. We found that TRIM28, TBL1XR1, SMARCA4, and JUND share broadly common themes as evidenced by enrichment in the same categories (Figure 3). We used the Bioconductor package UpSetR4 to visually show the relationship between these TF gene sets (i.e. what is similar or different about them). This analysis revealed that 2787 DES were shared among the TFs (Figure 4). With the exception of JUND which had 2456 unique genes, TRIM28, TBL1XR1, and SMARCA4 had much lower unique DES.
+
+Based on our analysis, we identified 15 TFs associated with histone modification which allowed us to perform comparative analysis to determine if there are any common biological themes between these TFs. We found that TRIM28, TBL1XR1, SMARCA4, and JUND were always clustered together regardless of what biological theme was studied (MF, BP, or CC) which was further validated with an UpSetR plot. Surprisingly, it was shown that 2787 DES were shared among these TFs – possibly suggesting that these TFs are critical for the activity of a single protein complex in K562 cells. Literature research revealed that SMARCA4 is an integral member of the SWI/SNF chromatin remodeling enzymes5,6 and TRIM28 interacts with SWI/SNF complex7. SWI/SNF is involved in many processes such as repairing damaged DNA, replicating DNA, and controlling cell proliferation and differentiation. At a cellular component level, TRIM28, TBL1XR1, SMARCA4, and JUND showed to play a role in the chromosomal region, ribosomal subunits, and cell-substrate junction (Figure 2A). At a biological processes level, they were enriched for DNA replications, DNA/RNA biosynthesis as well as histone modification (Figure 2B). At a molecular functions level, they were enriched for DNA damaged repair (ubiquitination) and DNA/RNA catalytic activity (Figure 2C). Surprisingly, the UpSetR plot showed that JUND had 2467 unique DES, while the rest had much lower unique DES. This suggest that the TRIM28, TBL1XR1, and SMARCA4 are essential for the SWI/SNF complex and that JUND is not exclusive to the SWI/SNF complex. In conclusion, our results showed no common theme between all of the histone modification TFs. With the exception of HMGN1 (sometimes failing to show any significant amount of enrichment), there were two clusters formed between the 14 TFs.
+
+##### Creating results for analysis
+
+```{r}
+#We are creating objects for each of the treatment vs control from our DEA from crispriSE based on the DAVID gene functional classification tool. We are also selecting genes from each treatment that have a padj<0.05.
+go_whsc1 <- results(crispriDE, 
+                   name = "treatment_WHSC1_vs_CRISPRi_CONTROL")
+go_whsc1 <- go_whsc1[go_whsc1$padj < 0.05 & !is.na(go_whsc1$padj), ]
+
+go_cited2 <- results(crispriDE, 
+                   name = "treatment_CITED2_vs_CRISPRi_CONTROL")
+go_cited2 <- go_cited2[go_cited2$padj < 0.05 & !is.na(go_cited2$padj), ]
+
+go_setdb1 <- results(crispriDE, 
+                   name = "treatment_SETDB1_vs_CRISPRi_CONTROL")
+go_setdb1 <- go_setdb1[go_setdb1$padj < 0.05 & !is.na(go_setdb1$padj), ]
+
+go_smarca4 <- results(crispriDE, 
+                   name = "treatment_SMARCA4_vs_CRISPRi_CONTROL")
+go_smarca4 <- go_smarca4[go_smarca4$padj < 0.05 & !is.na(go_smarca4$padj), ]
+
+go_hmgn3 <- results(crispriDE, 
+                   name = "treatment_HMGN3_vs_CRISPRi_CONTROL")
+go_hmgn3 <- go_hmgn3[go_hmgn3$padj < 0.05 & !is.na(go_hmgn3$padj), ]
+
+go_hmgn2 <- results(crispriDE, 
+                   name = "treatment_HMGN2_vs_CRISPRi_CONTROL")
+go_hmgn2 <- go_hmgn2[go_hmgn2$padj < 0.05 & !is.na(go_hmgn2$padj), ]
+
+go_hmgn1 <- results(crispriDE, 
+                   name = "treatment_HMGN1_vs_CRISPRi_CONTROL")
+go_hmgn1 <- go_hmgn1[go_hmgn1$padj < 0.05 & !is.na(go_hmgn1$padj), ]
+
+go_hmgb2 <- results(crispriDE, 
+                   name = "treatment_HMGB2_vs_CRISPRi_CONTROL")
+go_hmgb2 <- go_hmgb2[go_hmgb2$padj < 0.05 & !is.na(go_hmgb2$padj), ]
+
+go_hdac8 <- results(crispriDE, 
+                   name = "treatment_HDAC8_vs_CRISPRi_CONTROL")
+go_hdac8 <- go_hdac8[go_hdac8$padj < 0.05 & !is.na(go_hdac8$padj), ]
+
+go_hmga1 <- results(crispriDE, 
+                   name = "treatment_HMGA1_vs_CRISPRi_CONTROL")
+go_hmga1 <- go_hmga1[go_hmga1$padj < 0.05 & !is.na(go_hmga1$padj), ]
+
+go_hmgn2 <- results(crispriDE, 
+                   name = "treatment_HMGN2_vs_CRISPRi_CONTROL")
+go_hmgn2 <- go_hmgn2[go_hmgn2$padj < 0.05 & !is.na(go_hmgn2$padj), ]
+
+go_jund <- results(crispriDE, 
+                   name = "treatment_JUND_vs_CRISPRi_CONTROL")
+go_jund <- go_jund[go_jund$padj < 0.05 & !is.na(go_jund$padj), ]
+
+go_rbbp7 <- results(crispriDE, 
+                   name = "treatment_RBBP7_vs_CRISPRi_CONTROL")
+go_rbbp7 <- go_rbbp7[go_rbbp7$padj < 0.05 & !is.na(go_rbbp7$padj), ]
+
+go_rnf2 <- results(crispriDE, 
+                   name = "treatment_RNF2_vs_CRISPRi_CONTROL")
+go_rnf2 <- go_rnf2[go_rnf2$padj < 0.05 & !is.na(go_rnf2$padj), ]
+
+go_tbl1xr1 <- results(crispriDE, 
+                   name = "treatment_TBL1XR1_vs_CRISPRi_CONTROL")
+go_tbl1xr1 <- go_tbl1xr1[go_tbl1xr1$padj < 0.05 & !is.na(go_tbl1xr1$padj), ]
+
+go_trim28 <- results(crispriDE, 
+                   name = "treatment_TRIM28_vs_CRISPRi_CONTROL")
+go_trim28 <- go_trim28[go_trim28$padj < 0.05 & !is.na(go_trim28$padj), ]
+
+```
+
+##### Created a list for enrichGO analysis
+
+```{r}
+#We are creating a list for enrichGO analysis. The list is necessary to use clusterProfiler for the compareCluster function which allows us to do a comparative analysis across our TFs.
+HisGO <- list(CITED2 = rownames(go_cited2),
+              SETDB1 = rownames(go_setdb1),
+              SMARCA4 = rownames(go_smarca4),
+              WHSC1 = rownames(go_whsc1),
+              HMGN3 = rownames(go_hmgn3),
+              HMGB2 = rownames(go_hmgb2),
+              HMGN1 = rownames(go_hmgn1),
+              HDAC8 = rownames(go_hdac8), 
+              HMGA1 = rownames(go_hmga1),
+              JUND = rownames(go_jund),
+              RBBP7 = rownames(go_rbbp7), 
+              RNF2 = rownames(go_rnf2),
+              TBL1XR1 = rownames(go_tbl1xr1),
+              TRIM28 = rownames(go_trim28))
+```
+
+##### Comparative analysis of MF
+
+```{r}
+HisGO_MF<- compareCluster(geneCluster = HisGO,
+                      fun = "enrichGO",
+                      OrgDb = org.Hs.eg.db,
+                      ont = "MF", qvalueCutoff = 0.05,
+                      keyType = "ENSEMBL")
+```
+
+##### Clustering TFs based on their computed gene ratio from each MF GO term
+
+```{r}
+HisGO_MF_df <- as.data.frame(HisGO_MF)[, c(1,2,4,7)]
+head(HisGO_MF_df)               
+HisGO_MF_df$ratio_compute <- sapply(HisGO_MF_df$GeneRatio, function(x) {eval(parse(text = x))})
+
+HisGO_MF_matrix <- HisGO_MF_df %>% dplyr::select( -c(GeneRatio, ratio_compute) ) %>% spread(Cluster, p.adjust)
+rownames(HisGO_MF_matrix) <- HisGO_MF_matrix$ID
+HisGO_MF_matrix$ID <- NULL
+HisGO_MF_matrix <- as.matrix(HisGO_MF_matrix)
+HisGO_MF_matrix[is.na(HisGO_MF_matrix)] <- 1
+HisGO_MF_hc <- hclust(dist(t(HisGO_MF_matrix)), method = "ward.D2")
+HisGO_MF_hc$order
+plot(HisGO_MF_hc)
+
+
+```
+
+##### Comparative analysis of BP
+
+```{r}
+HisGO_BP<- compareCluster(geneCluster = HisGO,
+                      fun = "enrichGO",
+                      OrgDb = org.Hs.eg.db,
+                      ont = "BP", qvalueCutoff = 0.05,
+                      keyType = "ENSEMBL")
+```
+
+#####Clustering TFs based on their computed gene ratio from each BP GO term
+
+```{r}
+HisGO_BP_df <- as.data.frame(HisGO_BP)[, c(1,2,4,7)]
+head(HisGO_BP_df)               
+HisGO_BP_df$ratio_compute <- sapply(HisGO_BP_df$GeneRatio, function(x) {eval(parse(text = x))})
+
+HisGO_BP_matrix <- HisGO_BP_df %>% dplyr::select( -c(GeneRatio, ratio_compute) ) %>% spread(Cluster, p.adjust)
+rownames(HisGO_BP_matrix) <- HisGO_BP_matrix$ID
+HisGO_BP_matrix$ID <- NULL
+HisGO_BP_matrix <- as.matrix(HisGO_BP_matrix)
+HisGO_BP_matrix[is.na(HisGO_BP_matrix)] <- 1
+HisGO_BP_hc <- hclust(dist(t(HisGO_BP_matrix)), method = "ward.D2")
+HisGO_BP_hc$order
+plot(HisGO_BF_hc)
+```
+
+#####Comparative analysis of CC
+
+```{r}
+HisGO_CC<- compareCluster(geneCluster = HisGO,
+                      fun = "enrichGO",
+                      OrgDb = org.Hs.eg.db,
+                      ont = "CC", qvalueCutoff = 0.05,
+                      keyType = "ENSEMBL")
+```
+
+##### Clustering TFs based on their computed gene ratio from each CC GO term
+
+```{r}
+HisGO_CC_df <- as.data.frame(HisGO_CC)[, c(1,2,4,7)]
+head(HisGO_CC_df)               
+HisGO_CC_df$ratio_compute <- sapply(HisGO_CC_df$GeneRatio, function(x) {eval(parse(text = x))})
+
+HisGO_CC_matrix <- HisGO_CC_df %>% dplyr::select( -c(GeneRatio, ratio_compute) ) %>% spread(Cluster, p.adjust)
+rownames(HisGO_CC_matrix) <- HisGO_CC_matrix$ID
+HisGO_CC_matrix$ID <- NULL
+HisGO_CC_matrix <- as.matrix(HisGO_CC_matrix)
+HisGO_CC_matrix[is.na(HisGO_CC_matrix)] <- 1
+HisGO_CC_hc <- hclust(dist(t(HisGO_CC_matrix)), method = "ward.D2")
+HisGO_CC_hc$order
+plot(HisGO_CC_hc)
+```
+##### UpSet Plot to check for shared differentially expressed genes
+```{r}
+#Based on our hclustering, it showed that TRIM28, TBL1XR1, and SMARCA4 clustered together. So we wanted to do an UpSet plot to see the relationship between these three TFs. 
+Hisfamily <- c("treatment_TRIM28_vs_CRISPRi_CONTROL", "treatment_TBL1XR1_vs_CRISPRi_CONTROL", "treatment_SMARCA4_vs_CRISPRi_CONTROL")
+
+commonsdegenes <- sapply(Hisfamily, function(x) {
+  x <- x[x$padj < 0.05 & !is.na(x$padj),]
+  x_names <- rownames(x)
+  return(x_names)
+})
+upset(fromList(commondegenes))
+```
+
+
+#### Effects of knockdown on specific, identified molecular pathways pathways (Rebecca)
+
+n order to investigate which particular pathways are affected by the knockdowns, chosen by the Snyder lab on the chosen leukemia cell line, an enrichment analysis was performed on the differentially expressed genes. An abundance of gene ontologies were identified including the oxidation-reduction process, the catabolic process, and the negative regulation of metabolic process; however, the developmental process involved in reproduction was chosen due to the association of Leukemia Inhibitory Factor(LIF) and its role in female reproduction. LIF is a pleiotropic cytokine and attains the ability to induce the terminal differentiation of myeloid leukemic cells. 
+There are ten unique transcription factors that are included in the developmental process involved in reproduction (GO term "GO:0003006”).  In order to better understand the consequences of knockdowns of genes associated with this pathway, we performed gene set enrichment analysis(GSEA) on the DE genelist for each of the 10 knockdown experiments.  A dotplot of the  GSEA analysis of Biological Process(BP) of developmental Process involved in Reproduction (Figure 2) reveals that nine  of the ten factors are involved in small molecule catabolic processes. Moreover, just over half of all the transcription factors are involved in DNA dependent DNA regulation, glucose metabolic process, as well as alpha amino acid biosynthetic process.   
+A Kyoto Encyclopedia of Genes and Genomes (KEGG) pathway analysis was performed in order to identify the biological systems that are correlated with the ten knockdown experiments. The KEGG pathway analysis dotplot (Figure4) revealed that both  GATA1 and SMAD5 which are transactivators, are involved in cell cycle, ubiquitin mediated proteolysis, nucleotide excision repair, and DNA dependent ATPase activity among others. Moreover, we see that the knockdown of these transcription factors results in down-regulation of these pathways as measured by the enrichment scores.
+Although after the initial enrichment analysis, the developmental process involved in reproduction, was chosen due to the interest between LIF and the female reproductive process, the GSEA analysis of biological processes (Figure 2) as well the KEGG pathway analysis (Figure 4) both highlight the role of hematopoiesis in the experimental knockdowns. As seen in Figure 2, seven out of ten identified transcription factors of the GSEA analysis are associated with the glucose metabolic process. Glucose metabolism has been shown to regulate hematopoiesis and hematopoietic Stem cell differentiation [2]. As evident for the KEGG pathway analysis (Figure 4), GATA1 and SMAD5 present a  similar pattern of involvement in cell cycle, ubiquitin mediated proteolysis, nucleotide excision repair, and DNA dependent ATPase activity among others. SMAD5 is a downstream signal transducers of the transforming growth factor β (TGF-β) superfamily, which regulates both embryonic and adult hematopoiesis.
+
+```{r rebeccas_code}
+load("lec4_results.rda")
+sizeFactors(crispriDE)[1:4]
+plotDispEsts(crispriDE)
+resultsNames(crispriDE)
+crispriDE
+
+TF_list <- unique(as.character(colData(crispriDE)$treatment))
+TF_list <- TF_list[-2]
+## Convert from Gene Symbol to ENTREZID (ensembl too for reference)
+ids <- bitr(TF_list, fromType = "SYMBOL", toType = c("ENTREZID", "ENSEMBL"),
+            OrgDb = org.Hs.eg.db)
+## Check which go terms are represented by these genes. Try playing with the "level" parameter and the "ont" parameter
+ggo <- groupGO(gene = unique(ids$ENTREZID),
+               OrgDb = org.Hs.eg.db,
+               ont = "BP",
+               keyType = "ENTREZID",
+               level = 3)
+#stop("check the dataframe")
+barplot(ggo, drop = T)
+ggo_readable <- setReadable(ggo, OrgDb = org.Hs.eg.db)
+head(ggo@result)
+ggo[, c(1:4)]
+
+### INVESTIGATING GO:0003006
+#developmental process involved in reproduction 
+#devrep_genelist <- as.character(ggo@result["GO:0003006", ]$geneID)
+#devrep_genelist <- stringr::str_split(sgc_genelist, "/")[[1]]
+#devrep_genelist <- bitr(sgc_genelist, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+
+
+#GO:0055114	GO:0055114	oxidation-reduction process	1	1/73
+#       SYMBOL ENTREZID         ENSEMBL
+#32   THAP1    55145 ENSG00000131931
+#treatment_THAP1_vs_CRISPRi_CONTROL
+
+```
+
+
+```{r}
+gsea_list <- results(crispriDE, 
+                     name = "treatment_RNF2_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listRNF2 <- results(crispriDE, 
+                   name = "treatment_RNF2_vs_CRISPRi_CONTROL")
+go_listRNF2 <- go_listRNF2[go_listRNF2$padj < 0.1 & !is.na(go_listRNF2$padj), ]
+go_resRNF2 <- enrichGO(gene = rownames(go_listRNF2),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_resRNF2)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+#kkRNF2 <- enrichKEGGRNF2(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+#head(kkRNF2)
+#emapplot(kkRNF2)
+#kk_FC_RNF2 <- go_list$log2FoldChange
+#names(kk_FC_RNF2) <- rownames(go_list)
+#kk_FC_RNF2 <- kk_FC[ids$ENSEMBL]
+#kk_RNF2 <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC_RNF2) <- ids$SYMBOL
+#cnetplot(kk_RNF2, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+```{r}
+#for SIX5 
+gsea_list <- results(crispriDE, 
+                     name = "treatment_SIX5_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listSIX5 <- results(crispriDE, 
+                   name = "treatment_SIX5_vs_CRISPRi_CONTROL")
+go_listSIX5 <- go_listSIX5[go_listSIX5$padj < 0.1 & !is.na(go_listSIX5$padj), ]
+
+twoTFS <- list(SIX5 = rownames(go_listSIX5),
+               RNF2 = rownames(go_listRNF2))
+               
+twoTFS_compare <- compareCluster(geneCluster = twoTFS,
+                                 fun = "enrichGO",
+                                 OrgDb = org.Hs.eg.db,
+                                 ont = "MF", qvalueCutoff = 0.1,
+                                 keyType = "ENSEMBL")
+#dotplot(twoTFS_compare)
+
+
+go_resSIX5 <- enrichGO(gene = rownames(go_listSIX5),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+           # toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+kkSIX5 <- enrichKEGGSIX5(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+head(kk_SIX5)
+emapplot(kk_SIX5)
+#kk_FC_SIX5 <- go_list$log2FoldChange
+#names(kk_FC_SIX5) <- rownames(go_list)
+#kk_FC_SIX5 <- kk_FC[ids$ENSEMBL]
+#kk_SIX5 <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC_SIX5) <- ids$SYMBOL
+#cnetplot(kk_SIX5, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+```{r}
+#for cited2
+gsea_list <- results(crispriDE, 
+                     name = "treatment_CITED2_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listCITED2 <- results(crispriDE, 
+                   name = "treatment_CITED2_vs_CRISPRi_CONTROL")
+go_listCITED2 <- go_listCITED2[go_listCITED2$padj < 0.1 & !is.na(go_listCITED2$padj), ]
+go_resCITED2 <- enrichGO(gene = rownames(go_listCITED2),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                         # by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+head(kk)
+emapplot(kk)
+#kk_FC <- go_list$log2FoldChange
+#names(kk_FC) <- rownames(go_list)
+#kk_FC <- kk_FC[ids$ENSEMBL]
+#kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC) <- ids$SYMBOL
+#cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+```{r}
+com_clus_rb <- compareCluster(geneCluster = sgc_genelist, fun = "enrichKEGG")
+head(as.data.frame(com_clus_rb))
+
+```
+
+
+```{r}
+#for HMGB2
+gsea_list <- results(crispriDE, 
+                     name = "treatment_HMGB2_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listHMGB2 <- results(crispriDE, 
+                   name = "treatment_HMGB2_vs_CRISPRi_CONTROL")
+go_listHMGB2 <- go_listHMGB2[go_listHMGB2$padj < 0.1 & !is.na(go_listHMGB2$padj), ]
+go_resHMGB2 <- enrichGO(gene = rownames(go_listHMGB2),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+head(kk)
+emapplot(kk)
+#kk_FC <- go_list$log2FoldChange
+#names(kk_FC) <- rownames(go_list)
+#kk_FC <- kk_FC[ids$ENSEMBL]
+#kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC) <- ids$SYMBOL
+#cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+
+```{r}
+#for GATA2
+gsea_list <- results(crispriDE, 
+                     name = "treatment_GATA2_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listGATA2 <- results(crispriDE, 
+                   name = "treatment_GATA2_vs_CRISPRi_CONTROL")
+go_listGATA2 <- go_listGATA2[go_listGATA2$padj < 0.1 & !is.na(go_listGATA2$padj), ]
+go_resGATA2 <- enrichGO(gene = rownames(go_listGATA2),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+#kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+#head(kk)
+#emapplot(kk)
+#kk_FC <- go_list$log2FoldChange
+#names(kk_FC) <- rownames(go_list)
+#kk_FC <- kk_FC[ids$ENSEMBL]
+#kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC) <- ids$SYMBOL
+#cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+
+```{r}
+#for TRIM28
+gsea_list <- results(crispriDE, 
+                     name = "treatment_TRIM28_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listTRIM28 <- results(crispriDE, 
+                   name = "treatment_TRIM28_vs_CRISPRi_CONTROL")
+go_listTRIM28 <- go_listTRIM28[go_listTRIM28$padj < 0.1 & !is.na(go_listTRIM28$padj), ]
+go_resTRIM28 <- enrichGO(gene = rownames(go_listTRIM28),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+#kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+#head(kk)
+#emapplot(kk)
+#kk_FC <- go_list$log2FoldChange
+#names(kk_FC) <- rownames(go_list)
+#kk_FC <- kk_FC[ids$ENSEMBL]
+#kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC) <- ids$SYMBOL
+#cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+
+```{r}
+#for NR2F2
+gsea_list <- results(crispriDE, 
+                     name = "treatment_NR2F2_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listNR2F2 <- results(crispriDE, 
+                   name = "treatment_NR2F2_vs_CRISPRi_CONTROL")
+go_listNR2F2 <- go_listNR2F2[go_listNR2F2$padj < 0.1 & !is.na(go_listNR2F2$padj), ]
+go_resNR2F2 <- enrichGO(gene = rownames(go_listNR2F2),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+#kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+#head(kk)
+#emapplot(kk)
+#kk_FC <- go_list$log2FoldChange
+#names(kk_FC) <- rownames(go_list)
+#kk_FC <- kk_FC[ids$ENSEMBL]
+#kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+#names(kk_FC) <- ids$SYMBOL
+#cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+
+```{r}
+#for SMAD5
+# GSEA
+SMAD5_gsea_list <- results(crispriDE,
+                           name = "treatment_SMAD5_vs_CRISPRi_CONTROL")
+
+SMAD5_gsea_list <- SMAD5_gsea_list[!is.na(SMAD5_gsea_list$log2FoldChange), ]
+
+SMAD5_gsea_FC <- SMAD5_gsea_list$log2FoldChange
+
+names(SMAD5_gsea_FC) <- rownames(SMAD5_gsea_list)
+
+SMAD5_gsea_FC <- sort(SMAD5_gsea_FC, decreasing = TRUE)
+
+SMAD5_gsea_res_MF <- gseGO(geneList = SMAD5_gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                           ont = "MF", nPerm = 1000, pvalueCutoff = .1)
+SMAD5_gsea_res_BP <- gseGO(geneList = SMAD5_gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                           ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+
+dotplot(SMAD5_gsea_res_MF)
+dotplot(SMAD5_gsea_res_BP)
+
+SMAD5_gsea_res_BP[order(SMAD5_gsea_res_BP$enrichmentScore), 1:7][1:3, ]
+
+gseaplot(SMAD5_gsea_res_BP, geneSetID = SMAD5_gsea_res_BP[order(SMAD5_gsea_res_BP$enrichmentScore), ][1, "ID"])
+
+# Enrichment
+go_listSMAD5 <- results(crispriDE, 
+                        name = "treatment_SMAD5_vs_CRISPRi_CONTROL")
+go_listSMAD5 <- go_listSMAD5[go_listSMAD5$padj < 0.1 & !is.na(go_listSMAD5$padj), ]
+go_resSMAD5 <- enrichGO(gene = rownames(go_listSMAD5),
+                        OrgDb = org.Hs.eg.db,
+                        keyType = "ENSEMBL",
+                        ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+SMAD5_ids <- bitr(rownames(go_listSMAD5), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+SMAD5_kk <- enrichKEGG(gene = SMAD5_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(SMAD5_kk)
+emapplot(SMAD5_kk)
+# SMAD5_kk_FC <- go_listSMAD5$log2FoldChange
+# names(SMAD5_kk_FC) <- rownames(go_listSMAD5)
+# SMAD5_kk_FC <- SMAD5_kk_FC[SMAD5_ids$ENSEMBL]
+# SMAD5_kk <- setReadable(SMAD5_kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+# names(SMAD5_kk_FC) <- SMAD5_ids$SYMBOL
+# cnetplot(SMAD5_kk, categorySize = "pvalue", foldChange = SMAD5_kk_FC, colorEdge = T)
+
+```
+
+
+```{r}
+#for HSF1
+gsea_list <- results(crispriDE, 
+                     name = "treatment_HSF1_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listHSF1 <- results(crispriDE, 
+                   name = "treatment_HSF1_vs_CRISPRi_CONTROL")
+go_listHSF1 <- go_listHSF1[go_listHSF1$padj < 0.1 & !is.na(go_listHSF1$padj), ]
+
+go_resHSF1 <- enrichGO(gene = rownames(go_listHSF1),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+#dotplot(go_res)
+
+#emapplot(go_res)
+go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          by = "p.adjust", select_fun = min)
+emapplot(go_res_simple)
+
+ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+head(kk)
+emapplot(kk)
+kk_FC <- go_list$log2FoldChange
+names(kk_FC) <- rownames(go_list)
+kk_FC <- kk_FC[ids$ENSEMBL]
+kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+names(kk_FC) <- ids$SYMBOL
+cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+
+```{r}
+#for GATA1
+gsea_list <- results(crispriDE, 
+                     name = "treatment_GATA1_vs_CRISPRi_CONTROL")
+
+gsea_list <- gsea_list[!is.na(gsea_list$log2FoldChange), ]
+
+gsea_FC <- gsea_list$log2FoldChange
+
+names(gsea_FC) <- rownames(gsea_list)
+
+gsea_FC <- sort(gsea_FC, decreasing = TRUE)
+head(gsea_FC)
+
+gsea_res <- gseGO(geneList = gsea_FC, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL",
+                  ont = "BP", nPerm = 1000, pvalueCutoff = .1)
+#dotplot(gsea_res)
+
+gsea_res[order(gsea_res$enrichmentScore), 1:7][1:3, ]
+
+
+gseaplot(gsea_res, geneSetID = "GO:0003006")
+
+go_listGATA1 <- results(crispriDE, 
+                   name = "treatment_GATA1_vs_CRISPRi_CONTROL")
+go_listGATA1<- go_listGATA1[go_listGATA1$padj < 0.1 & !is.na(go_listGATA1$padj), ]
+
+go_resGATA1 <- enrichGO(gene = rownames(go_listGATA1),
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 0.1)
+
+dotplot(go_res)
+
+#emapplot(go_res)
+#go_res_simple <- simplify(go_res, cutoff = 0.7,
+                          #by = "p.adjust", select_fun = min)
+#emapplot(go_res_simple)
+
+#ids <- bitr(rownames(go_list), fromType = "ENSEMBL", 
+            #toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+#kk <- enrichKEGG(gene = ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+head(kk)
+emapplot(kk)
+kk_FC <- go_list$log2FoldChange
+names(kk_FC) <- rownames(go_list)
+kk_FC <- kk_FC[ids$ENSEMBL]
+kk <- setReadable(kk, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+names(kk_FC) <- ids$SYMBOL
+cnetplot(kk, categorySize = "pvalue", foldChange = kk_FC, colorEdge = T)
+```
+
+
+```{r, fig.height= 10, fig.width=15, fig.cap = " Molecular Fucntion Dotplot "}
+#comparison for Molecular Function(MF)
+TenTFS <- list(RNF2 = rownames(go_listRNF2),
+              SIX5 = rownames(go_listSIX5),
+              CITED2 = rownames(go_listCITED2),
+              HMGB2 = rownames(go_listHMGB2),
+              GATA2 = rownames(go_listGATA2),
+              TRIM28 = rownames(go_listTRIM28),
+              NR2F2 = rownames(go_listNR2F2),
+              SMAD5 = rownames(go_listSMAD5), 
+              HSF1 = rownames(go_listHSF1),
+              GATA1 = rownames(go_listGATA1))
+              
+TenTFS_compare <- compareCluster(geneCluster = TenTFS,
+                      fun = "enrichGO",
+                      OrgDb = org.Hs.eg.db,
+                      ont = "MF", qvalueCutoff = 0.1,
+                      keyType = "ENSEMBL")
+                      
+dotplot(TenTFS_compare,
+        title = "Comparison of Ten TFs for GO:000306 - Molecular Function (MF) -
+ Developmental Process involved in Reproduction") + xlab("Transcription Factors")                      
+                    
+                                
+  
+```
+
+
+```{r, fig.height= 10, fig.width=15 }
+TenTFS <- list(RNF2 = rownames(go_listRNF2),
+              SIX5 = rownames(go_listSIX5),
+              CITED2 = rownames(go_listCITED2),
+              HMGB2 = rownames(go_listHMGB2),
+              GATA2 = rownames(go_listGATA2),
+              TRIM28 = rownames(go_listTRIM28),
+              NR2F2 = rownames(go_listNR2F2),
+              SMAD5 = rownames(go_listSMAD5), 
+              HSF1 = rownames(go_listHSF1),
+              GATA1 = rownames(go_listGATA1))
+
+#ex_KEGG_TenTFS <- list(SMAD5 = SMAD5_ids$ENTREZID,
+                       #)              
+
+
+TenTFS_compareBP <- compareCluster(geneCluster = TenTFS,
+                      fun = "enrichGO",
+                      OrgDb = org.Hs.eg.db,
+                      ont = "BP", qvalueCutoff = 0.1,
+                      keyType = "ENSEMBL")
+                      
+dotplot(TenTFS_compareBP,
+        title = "Comparison of Ten TFs for GO:000306 - Biological Process (BP) -
+ Developmental Process involved in Reproduction") + xlab("Transcription Factors") 
+
+
+```
+
+
+
+```{r}
+#Biological Process 
+TenTFS_compareBP <- compareCluster(geneCluster = TenTFS,
+                      fun = "enrichGO",
+                      OrgDb = org.Hs.eg.db,
+                      ont = "BP", qvalueCutoff = 0.1,
+                      keyType = "ENSEMBL")
+
+
+```
+
+```{r}
+#UpsetR plot 
+
+commonsignifgenes <- sapply(TenTFS, function(x) {
+  x <- x[x$padj < 0.1 & !is.na(x$padj),]
+  x_names <- rownames(x)
+  return(x_names)
+})
+a <-  upset(fromList(TenTFS), nsets = 10)
+b <- upset(fromList(TenTFS), nsets = 10, order.by = "freq")
+c <- upset(fromList(TenTFS), nsets = 10, order.by = "degree")
+cowplot::plot_grid(a, b, c)
+```
+
+
+```{r}
+#KEGG PATHWAY ANALYSIS
+ #for RNF2
+# GSEA
+
+go_listRNF2 <- results(crispriDE, 
+                        name = "treatment_RNF2_vs_CRISPRi_CONTROL")
+go_listRNF2 <- go_listRNF2[go_listRNF2$padj < 0.1 & !is.na(go_listRNF2$padj), ]
+
+
+RNF2_ids <- bitr(rownames(go_listRNF2), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+RNF2_kk <- enrichKEGG(gene = RNF2_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(RNF2_kk)
+emapplot(RNF2_kk)
+
+
+#for SIX5
+# GSEA
+go_listSIX5 <- results(crispriDE, 
+                        name = "treatment_SIX5_vs_CRISPRi_CONTROL")
+go_listSIX5 <- go_listSIX5[go_listSIX5$padj < 0.1 & !is.na(go_listSIX5$padj), ]
+
+
+SIX5_ids <- bitr(rownames(go_listSIX5), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+SIX5_kk <- enrichKEGG(gene = SIX5_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(SIX5_kk)
+emapplot(SIX5_kk)
+
+
+#for CITED2
+# GSEA
+go_listCITED2 <- results(crispriDE, 
+                        name = "treatment_CITED2_vs_CRISPRi_CONTROL")
+go_listCITED2 <- go_listCITED2[go_listCITED2$padj < 0.1 & !is.na(go_listCITED2$padj), ]
+
+
+CITED2_ids <- bitr(rownames(go_listCITED2), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+CITED2_kk <- enrichKEGG(gene = CITED2_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(CITED2_kk)
+emapplot(CITED2_kk)
+
+#for HMGB2
+# GSEA
+
+go_listHMGB2 <- results(crispriDE, 
+                        name = "treatment_HMGB2_vs_CRISPRi_CONTROL")
+go_listHMGB2 <- go_listHMGB2[go_listHMGB2$padj < 0.1 & !is.na(go_listHMGB2$padj), ]
+
+
+HMGB2_ids <- bitr(rownames(go_listHMGB2), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+HMGB2_kk <- enrichKEGG(gene = HMGB2_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(HMGB2_kk)
+#emapplot(HMGB2_kk)
+
+#for TRIM28
+# GSEA
+go_listTRIM28 <- results(crispriDE, 
+                        name = "treatment_TRIM28_vs_CRISPRi_CONTROL")
+go_listTRIM28 <- go_listTRIM28[go_listTRIM28$padj < 0.1 & !is.na(go_listTRIM28$padj), ]
+
+
+TRIM28_ids <- bitr(rownames(go_listTRIM28), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+TRIM28_kk <- enrichKEGG(gene = TRIM28_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(TRIM28_kk)
+emapplot(TRIM28_kk)
+
+
+#for NR2F2
+# GSEA
+go_listNR2F2 <- results(crispriDE, 
+                        name = "treatment_NR2F2_vs_CRISPRi_CONTROL")
+go_listNR2F2 <- go_listNR2F2[go_listNR2F2$padj < 0.1 & !is.na(go_listNR2F2$padj), ]
+
+
+NR2F2_ids <- bitr(rownames(go_listNR2F2), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+NR2F2_kk <- enrichKEGG(gene = NR2F2_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(NR2F2_kk)
+emapplot(NR2F2_kk)
+
+#for HSF1
+# GSEA
+
+go_listHSF1 <- results(crispriDE, 
+                        name = "treatment_HSF1_vs_CRISPRi_CONTROL")
+go_listhsf1 <- go_listHSF1[go_listHSF1$padj < 0.1 & !is.na(go_listHSF1$padj), ]
+
+
+HSF1_ids <- bitr(rownames(go_listHSF1), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+HSF1_kk <- enrichKEGG(gene = HSF1_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(HSF1_kk)
+emapplot(HSF1_kk)
+
+#for GATA1
+# GSEA
+
+go_listGATA1 <- results(crispriDE, 
+                        name = "treatment_GATA1_vs_CRISPRi_CONTROL")
+go_listGATA1 <- go_listGATA1[go_listGATA1$padj < 0.1 & !is.na(go_listGATA1$padj), ]
+
+
+GATA1_ids <- bitr(rownames(go_listGATA1), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+GATA1_kk <- enrichKEGG(gene = GATA1_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(GATA1_kk)
+emapplot(GATA1_kk)
+
+#for SMAD5
+# GSEA
+
+go_listSMAD5 <- results(crispriDE, 
+                        name = "treatment_SMAD5_vs_CRISPRi_CONTROL")
+go_listSMAD5 <- go_listSMAD5[go_listSMAD5$padj < 0.1 & !is.na(go_listSMAD5$padj), ]
+
+
+SMAD5_ids <- bitr(rownames(go_listSMAD5), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+SMAD5_kk <- enrichKEGG(gene = SMAD5_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(SMAD5_kk)
+emapplot(SMAD5_kk)
+
+#for GATA2
+# GSEA
+
+go_listGATA2 <- results(crispriDE, 
+                        name = "treatment_GATA2_vs_CRISPRi_CONTROL")
+go_listGATA2 <- go_listGATA2[go_listGATA2$padj < 0.1 & !is.na(go_listGATA2$padj), ]
+
+
+GATA2_ids <- bitr(rownames(go_listGATA2), fromType = "ENSEMBL", 
+                  toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+GATA2_kk <- enrichKEGG(gene = GATA2_ids$ENTREZID, organism = "hsa", pvalueCutoff = 0.01)
+head(GATA2_kk)
+emapplot(GATA2_kk)
+
+#KEGG Pathway analysis
+
+
+ex_KEGG_TenTFS <- list(SMAD5 = SMAD5_ids$ENTREZID,
+                       RNF2 = RNF2_ids$ENTREZID,
+                       SIX5 = SIX5_ids$ENTREZID,
+                       CITED2 = CITED2_ids$ENTREZID,
+                       HMGB2 = HMGB2_ids$ENTREZID,
+                       GATA2 = GATA2_ids$ENTREZID,
+                       TRIM28 = TRIM28_ids$ENTREZID,
+                       NR2F2 = NR2F2_ids$ENTREZID,
+                       HSF1 = HSF1_ids$ENTREZID,
+                       GATA1 = GATA1_ids$ENTREZID)
+# Number of genes considered
+lapply(ex_KEGG_TenTFS, function(x) {length(unique(x))})
+TenTFS_compareKEGG <- compareCluster(geneCluster = ex_KEGG_TenTFS,
+                      fun = "enrichKEGG")
+head(TenTFS_compareKEGG)
+dotplot(TenTFS_compareKEGG, title = "KEGG pathway Analysis") + xlab("TFs knockdown") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+##### Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+genesforrep <- pathview(gene.data = sgc_genelist,
+                     limit = list(gene=max(abs(geneList)), cpd=1))
+plot(pressure)
+```
+
+#### Knockdowns of 5 Stat TFs (Jennifer)
+
+All transcription factors in the STAT family, Stat1, Stat2, Stat5a, and Stat6, were successfully knocked down in the CRISPRi experiment. When Stat 1 is knocked know, 445 genes are up regulated, including GATA1, and 510 genes are down regulated. When Stat2 is knocked down, 2654 genes are up regulated, including KHSRP, and 4308 genes are down regulated. When Stat5A is knocked down, 204 genes are up regulated and 505 genes are down regulated. When Stat6 is knocked down, 1100 genes are up regulated and 1530 genes are down regulated. Although Stat5A and Stat6 were both successfully knocked down, many other transcription factors were also down regulated just as much.
+
+Knockdown of Stat2 resulted in more than 6000 differentially expressed (DE) genes, the highest number out of all the STAT family experiments. Of these 6000 DE genes, 5332 genes are uniquely differentially expressed after Stat2 knockdown. In contrast, knockdown of Stat5a only resulted in 709 DE genes, the lowest number of all STAT family experiments. Of these 709 DE genes, 56 genes are uniquely differentially expressed after Stat 5a knockdown. Knockdown of Stat2 and Stat6 results in 863 commonly differentially expressed genes, while knockdown of Stat2 and Stat1 results in 378 commonly differentially expressed genes. The 709 DE genes limit the number of commonly differentially expressed genes that the Stat5a knockdown experiment shares with the others. There are 27 common differentially expressed genes in all STAT family transcription factor knockdown experiments. Three out of the 27 genes, NFKBIA, VAV1, and MALT1, all share functions in TCR and BCR pathways.
+
+Stat2 may be involved in many more pathways, as implicated by the number of DE genes that resulted from the decreased function of Stat2. Since Stat2 has such a big impact on so many genes, it may be an essential protein, maybe even more so than the known Stat1. Stat2 and Stat6 proteins may interact with each other, since they have the highest number of common DE genes after knockdown, and may share some molecular pathways. Stat5A could be involved in the least number of pathways, since very few genes were impacted by its knockdown. We have found three genes that are commonly differentially expressed from each individual STAT family knockdown experiment, all of which converge in the T cell-receptor and B cell-receptor pathways, both related to immunity. Past research has outlined the functions of the STAT family transcription factors as related to cellular immunity. Although our result agrees with prior studies on STAT family function, we had hoped to uncover a different function or pathway that this family of transcription factors may share, and did not discover any new functions.
+
+##### Recoding batches
+```{r}
+colData(crispriSE)$batch
+colData(crispriSE)$batch <- as.character(colData(crispriSE)$batch)
+colData(crispriSE)[colData(crispriSE)$batch == 1, ]$batch <- "F"
+colData(crispriSE)[colData(crispriSE)$batch %in% c(2,3), ]$batch <- "A"
+colData(crispriSE)[colData(crispriSE)$batch %in% c(4,5), ]$batch <- "B"
+colData(crispriSE)[colData(crispriSE)$batch %in% c(6,7), ]$batch <- "C"
+```
+##### Preparing dataset for comparison of treatments to control
+```{r}
+colData(crispriSE)$treatment <- relevel(colData(crispriSE)$treatment, "CRISPRi_CONTROL")
+assays(crispriSE)$counts <- as.matrix(assays(crispriSE)$counts) # changing to matrix
+assays(crispriSE)$logcounts <- as.matrix(assays(crispriSE)$logcounts)
+crispriDE <- DESeqDataSet(crispriSE[, -c(1,2)], design = ~ batch + treatment) # analyze by batch and treatment
+```
+
+```{r}
+load("lec4_results.rda")
+STATfamily <- c("treatment_STAT1_vs_CRISPRi_CONTROL", "treatment_STAT2_vs_CRISPRi_CONTROL", "treatment_STAT5A_vs_CRISPRi_CONTROL", "treatment_STAT6_vs_CRISPRi_CONTROL") #concatenating 4 treatment groups in one
+statlist <- list()
+for (myresults in STATfamily) {
+  resultlist <- results(crispriDE, name = myresults, alpha = 0.1)
+  statlist <- c(statlist, list(resultlist))
+}
+statlist #differential expression analysis of all STAT family transcription factors
+```
+##### Checking treatment names and corresponding ENSEMBL IDs
+```{r}
+names(statlist) <- STATfamily
+DEcount <- sapply(statlist, nrow)
+DEcount # number of genes differentially expressed in each experiment
+bitr(geneID = c("STAT1", "STAT2", "STAT5A", "STAT6"), fromType = "SYMBOL", toType = "ENSEMBL", OrgDb = org.Hs.eg.db)
+```
+##### Pattern of DEA for STAT1 against all genes
+```{r}
+STAT1plotcount <- plotCounts(crispriDE, gene = "ENSG00000115415", intgroup = "treatment",
+                returnData = TRUE)
+ggplot(STAT1plotcount, aes(x = treatment, y = count)) + 
+  geom_point() + scale_y_log10() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+##### Pattern of DEA for STAT2 against all genes
+```{r}
+STAT2plotcount <- plotCounts(crispriDE, gene = "ENSG00000170581", intgroup = "treatment",
+                returnData = TRUE)
+ggplot(STAT2plotcount, aes(x = treatment, y = count)) + 
+  geom_point() + scale_y_log10() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+##### Pattern of DEA for STAT5A against all genes
+```{r}
+STAT5Aplotcount <- plotCounts(crispriDE, gene = "ENSG00000126561", intgroup = "treatment",
+                returnData = TRUE)
+ggplot(STAT5Aplotcount, aes(x = treatment, y = count)) + 
+  geom_point() + scale_y_log10() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+##### Pattern of DEA for STAT6 against all genes
+```{r}
+STAT6plotcount <- plotCounts(crispriDE, gene = "ENSG00000166888", intgroup = "treatment",
+                returnData = TRUE)
+ggplot(STAT6plotcount, aes(x = treatment, y = count)) + 
+  geom_point() + scale_y_log10() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+##### Checking whether knockdown of each experiment worked
+```{r}
+statlist$treatment_STAT1_vs_CRISPRi_CONTROL["ENSG00000115415", ]
+statlist$treatment_STAT2_vs_CRISPRi_CONTROL["ENSG00000170581", ]
+statlist$treatment_STAT5A_vs_CRISPRi_CONTROL["ENSG00000126561", ]
+statlist$treatment_STAT6_vs_CRISPRi_CONTROL["ENSG00000166888", ]
+```
+# Summary of number of differentially up- and down- regulated genes for each experiment
+```{r}
+summary(statlist$treatment_STAT1_vs_CRISPRi_CONTROL)
+summary(statlist$treatment_STAT2_vs_CRISPRi_CONTROL)
+summary(statlist$treatment_STAT5A_vs_CRISPRi_CONTROL)
+summary(statlist$treatment_STAT6_vs_CRISPRi_CONTROL)
+```
+##### Upsetter's plot showing unique and common differentially expressed genes from all STAT family experiments and extracting the 27 common differentially expressed genes in all four STAT family experiments
+```{r}
+commonsignifgenes <- sapply(statlist, function(x) {
+  x <- x[x$padj < 0.1 & !is.na(x$padj),]
+  x_names <- rownames(x)
+  return(x_names)
+})
+upset(fromList(commonsignifgenes))
+Twentysevengenes <- Reduce(intersect, commonsignifgenes)
+Twentysevengenes
+# bitr(geneID = Twentysevengenes, fromType = "ENSEMBL", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+```
+##### GO enrichment analysis and KEGG analysis
+```{r}
+go_res <- enrichGO(gene = Twentysevengenes,
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENSEMBL",
+                   ont = "MF", qvalueCutoff = 1)
+summary(go_res) # no common pathway found between the 27 commonly differentially expressed genes 
+dotplot(go_res)
+go_res
+EntIDs <- bitr(geneID = Twentysevengenes, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+EntIDs
+commonpath <- enrichKEGG(gene = EntIDs$ENTREZID, organism = "hsa", pvalueCutoff = 0.1)
+head(commonpath) #4792/7409/10892, ENSG00000100906/ENSG00000141968/ENSG00000172175 share common pathways
+emapplot(commonpath)
+EntIDs
+bitr(geneID = Twentysevengenes, fromType = "ENSEMBL", toType = "SYMBOL", OrgDb = org.Hs.eg.db) 
+```
+
+#### Reciprocal effects on other knockdown targets (Kiel)
+
+### Materials and Methods
+
+### Discussion
+
+### References
+
